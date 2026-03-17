@@ -57,19 +57,27 @@ def is_within_days(time_str, days=30):
         # 解析失败，保留
         return True
 
-# 添加 alphapai 客户端路径
+# 尝试导入 alphapai 客户端（可选）
 current_dir = os.path.dirname(os.path.abspath(__file__))
-ALPHAPAI_CLIENT_PATH = os.path.join(
-    os.path.dirname(current_dir),
-    'alphapai-research', 'alphapai-research', 'scripts'
-)
-sys.path.insert(0, ALPHAPAI_CLIENT_PATH)
+ALPHAPAI_AVAILABLE = False
 
 try:
+    # 尝试从环境中导入（如果已安装）
     from alphapai_client import AlphaPaiClient, load_config
     ALPHAPAI_AVAILABLE = True
 except ImportError:
-    ALPHAPAI_AVAILABLE = False
+    # 尝试从相对路径导入（如果在 skills 目录结构中）
+    try:
+        alphapai_path = os.path.join(
+            os.path.dirname(current_dir),
+            'alphapai-research', 'alphapai-research', 'scripts'
+        )
+        if os.path.exists(alphapai_path):
+            sys.path.insert(0, alphapai_path)
+            from alphapai_client import AlphaPaiClient, load_config
+            ALPHAPAI_AVAILABLE = True
+    except ImportError:
+        pass
 
 def get_market_code(stock_code):
     """判断股票市场代码"""

@@ -1,0 +1,55 @@
+# 股票上涨原因分析 - 配置文件
+
+# 分析设置
+analysis:
+  batch_size: 5  # 每批分析的股票数量
+  output_length: 100  # 每只股票分析字数限制
+
+  # 关注的关键词（优先提取包含这些词的信息）
+  focus_keywords:
+    - "业绩"
+    - "技术"
+    - "政策"
+    - "产能"
+    - "订单"
+    - "机构"
+    - "研报"
+
+  # 排除的关键词（跳过包含这些词的股票）
+  exclude_keywords:
+    - "ST"
+    - "退市"
+    - "*ST"
+
+# 数据源设置
+data_sources:
+  community:
+    - name: "韭研公社"
+      enabled: true
+      max_items: 6
+    - name: "东方财富股吧"
+      enabled: true
+      max_items: 6
+    - name: "淘股吧"
+      enabled: true
+      max_items: 5
+
+  research:
+    - name: "路演纪要"
+      enabled: true
+      max_items: 5
+    - name: "机构点评"
+      enabled: true
+      max_items: 5
+
+# 去重设置
+deduplication:
+  enabled: true
+  days: 7  # 跳过最近N天已分析的股票
+  storage_path: "data/analyzed_history.json"
+
+# 输出设置
+output:
+  format: "txt"  # txt | markdown | json
+  save_path: "./"  # 输出文件保存路径（默认当前目录，可改为绝对路径如 D:\我的分析\）
+  filename_template: "股票上涨原因分析_{date}.txt"  # {date} 会自动替换为日期（如 20260317）

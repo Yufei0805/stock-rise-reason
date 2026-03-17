@@ -9,24 +9,116 @@ import sys
 import json
 import subprocess
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
+import yaml
+import re
 
 # 使用本地 scraper.py
 CURRENT_DIR = Path(__file__).parent
 sys.path.insert(0, str(CURRENT_DIR))
 
-# 添加 alphapai 客户端路径
-ALPHAPAI_CLIENT_PATH = CURRENT_DIR.parent / 'alphapai-research' / 'alphapai-research' / 'scripts'
-sys.path.insert(0, str(ALPHAPAI_CLIENT_PATH))
-
+# 尝试导入 alphapai 客户端（可选）
+ALPHAPAI_AVAILABLE = False
 try:
+    # 尝试从环境中导入（如果已安装）
     from alphapai_client import AlphaPaiClient, load_config
     ALPHAPAI_AVAILABLE = True
 except ImportError:
-    ALPHAPAI_AVAILABLE = False
-    print("⚠️ AlphaPai 客户端未安装，将无法进行 AI 分析")
+    # 尝试从相对路径导入（如果在 skills 目录结构中）
+    try:
+        alphapai_path = CURRENT_DIR.parent / 'alphapai-research' / 'alphapai-research' / 'scripts'
+        if alphapai_path.exists():
+            sys.path.insert(0, str(alphapai_path))
+            from alphapai_client import AlphaPaiClient, load_config
+            ALPHAPAI_AVAILABLE = True
+    except ImportError:
+        pass
+
+if not ALPHAPAI_AVAILABLE:
+    print("ℹ️  AlphaPai 未配置，将只使用社区数据源（3个平台）")
+
+
+def load_app_config():
+    """加载配置文件"""
+    config_path = CURRENT_DIR / 'config.yaml'
+    if config_path.exists():
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def load_analyzed_history():
+    """加载已分析的股票历史"""
+    config = load_app_config()
+    history_path = CURRENT_DIR / config.get('deduplication', {}).get('storage_path', 'data/analyzed_history.json')
+
+    if history_path.exists():
+        try:
+            with open(history_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+
+def save_analyzed_history(stocks):
+    """保存已分析的股票历史"""
+    config = load_app_config()
+    history_path = CURRENT_DIR / config.get('deduplication', {}).get('storage_path', 'data/analyzed_history.json')
+
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    history = load_analyzed_history()
+
+    # 添加新记录
+    for stock in stocks:
+        history.append({
+            'code': stock['code'],
+            'name': stock.get('name'),
+            'date': datetime.now().isoformat()
+        })
+
+    # 保存
+    with open(history_path, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def filter_analyzed_stocks(stocks):
+    """过滤已分析的股票"""
+    config = load_app_config()
+    dedup_config = config.get('deduplication', {})
+
+    if not dedup_config.get('enabled', True):
+        return stocks, []
+
+    days = dedup_config.get('days', 7)
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    history = load_analyzed_history()
+
+    # 构建最近分析过的股票代码集合
+    recent_codes = set()
+    for record in history:
+        try:
+            record_date = datetime.fromisoformat(record['date'])
+            if record_date >= cutoff_date:
+                recent_codes.add(record['code'])
+        except:
+            pass
+
+    # 过滤
+    new_stocks = []
+    skipped_stocks = []
+
+    for stock in stocks:
+        if stock['code'] in recent_codes:
+            skipped_stocks.append(stock)
+        else:
+            new_stocks.append(stock)
+
+    return new_stocks, skipped_stocks
 
 
 def parse_stocks_from_excel(excel_path):
@@ -346,6 +438,49 @@ def count_data_sources(data):
     }
 
 
+def build_batch_analysis_prompt(batch_results):
+    """构建批量分析提示词"""
+    config = load_app_config()
+    output_length = config.get('analysis', {}).get('output_length', 100)
+
+    prompt = f"请分析以下 {len(batch_results)} 只股票的近期上涨原因，每只股票{output_length}字以内。\n\n"
+    prompt += "要求：\n"
+    prompt += "1. 提取核心驱动因素（业绩、政策、行业、事件等）\n"
+    prompt += "2. 优先引用专业投研观点\n"
+    prompt += "3. 语言简洁专业\n"
+    prompt += f"4. 每只股票严格控制在{output_length}字以内\n\n"
+    prompt += "="*80 + "\n\n"
+
+    for idx, result in enumerate(batch_results, 1):
+        stock = result['stock']
+        analysis = result['analysis']
+
+        # 股票标题
+        stock_name = stock['name'] or stock['code']
+        prompt += f"【股票{idx}】{stock_name} ({stock['code']})\n\n"
+
+        # 社区讨论
+        if analysis['community_titles']:
+            prompt += "社区讨论热点：\n"
+            for i, title in enumerate(analysis['community_titles'][:8], 1):
+                prompt += f"{i}. {title}\n"
+            prompt += "\n"
+
+        # 专业投研
+        if analysis['research_summaries']:
+            prompt += "专业投研观点：\n"
+            for i, summary in enumerate(analysis['research_summaries'][:8], 1):
+                prompt += f"{i}. {summary}\n"
+            prompt += "\n"
+
+        prompt += "-"*80 + "\n\n"
+
+    prompt += "\n请返回 JSON 格式：\n"
+    prompt += '{"analyses": [{"code": "股票代码", "name": "股票名称", "reason": "上涨原因分析"}]}\n'
+
+    return prompt
+
+
 def generate_report(results, output_file=None):
     """生成报告 - 输出数据供 Claude 分析"""
     print("\n" + "="*80)
@@ -392,26 +527,26 @@ def generate_report(results, output_file=None):
     return results
 
 
-def save_analysis_to_txt(results, analyses_dict, output_path):
-    """保存分析结果为txt文件"""
+def save_analysis_to_txt(results, output_path):
+    """保存分析结果为txt文件（模板格式，等待Claude填写）"""
     content = "股票上涨原因分析\n\n"
+    content += "# 请在下方填写每只股票的上涨原因分析（100字以内）\n\n"
 
     for result in results:
         stock = result['stock']
-        stock_key = f"{stock['name']}_{stock['code']}" if stock['name'] else stock['code']
 
-        if stock_key in analyses_dict:
-            if stock['name']:
-                content += f"{stock['name']} ({stock['code']})\n\n"
-            else:
-                content += f"{stock['code']}\n\n"
+        if stock['name']:
+            content += f"{stock['name']} ({stock['code']})\n\n"
+        else:
+            content += f"{stock['code']}\n\n"
 
-            content += f"{analyses_dict[stock_key]}\n\n"
+        content += "[请在此填写上涨原因分析，100字以内]\n\n"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"✅ 分析结果已保存到：{output_path}")
+    print(f"\n✅ 分析模板已保存到：{output_path}")
+    print(f"💡 请在文件中填写分析结果，或等待 Claude 自动填写\n")
 
 
 def main():
@@ -478,43 +613,94 @@ def main():
 
     print(f"📊 准备分析 {len(stocks)} 只股票...\n")
 
-    results = []
+    # 去重：过滤已分析的股票
+    config = load_app_config()
+    new_stocks, skipped_stocks = filter_analyzed_stocks(stocks)
 
-    for i, stock in enumerate(stocks, 1):
-        print(f"[{i}/{len(stocks)}] 分析 {stock.get('name') or stock.get('code')}...")
-
-        # 1. 爬取数据
-        print("  ├─ 爬取数据...")
-        data = fetch_stock_data(stock['code'], stock['name'] or stock['code'])
-
-        if not data.get('success'):
-            print(f"  └─ ❌ 爬取失败：{data.get('error')}")
-            continue
-
-        # 2. AI 分析
-        print(f"  ├─ AI 分析（{args.mode} 模式）...")
-        analysis = analyze_rise_reason(
-            stock['code'],
-            stock['name'] or stock['code'],
-            data,
-            mode=args.mode
-        )
-
-        print(f"  └─ ✓ 完成")
+    if skipped_stocks:
+        print(f"⏭️  跳过 {len(skipped_stocks)} 只最近已分析的股票：")
+        for stock in skipped_stocks:
+            print(f"  - {stock.get('name') or stock.get('code')} ({stock['code']})")
         print()
 
-        results.append({
-            'stock': stock,
-            'analysis': analysis
-        })
+    if not new_stocks:
+        print("✅ 所有股票都已在最近分析过，无需重复分析")
+        return
 
-    # 3. 生成报告
-    if results:
-        generate_report(results)
+    print(f"🔍 需要分析 {len(new_stocks)} 只新股票\n")
 
-        # 提示用户：数据已收集，等待Claude分析
+    # 批量分析
+    batch_size = config.get('analysis', {}).get('batch_size', 5)
+    all_results = []
+
+    for batch_idx in range(0, len(new_stocks), batch_size):
+        batch = new_stocks[batch_idx:batch_idx + batch_size]
+        batch_num = batch_idx // batch_size + 1
+        total_batches = (len(new_stocks) + batch_size - 1) // batch_size
+
+        print(f"\n{'='*80}")
+        print(f"📦 批次 {batch_num}/{total_batches}：分析 {len(batch)} 只股票")
+        print(f"{'='*80}\n")
+
+        batch_results = []
+
+        # 爬取每只股票的数据
+        for i, stock in enumerate(batch, 1):
+            print(f"[{i}/{len(batch)}] 爬取 {stock.get('name') or stock.get('code')}...")
+
+            data = fetch_stock_data(stock['code'], stock['name'] or stock['code'])
+
+            if not data.get('success'):
+                print(f"  └─ ❌ 失败：{data.get('error')}\n")
+                continue
+
+            analysis = analyze_rise_reason(
+                stock['code'],
+                stock['name'] or stock['code'],
+                data,
+                mode=args.mode
+            )
+
+            print(f"  └─ ✓ 完成\n")
+
+            batch_results.append({
+                'stock': stock,
+                'analysis': analysis
+            })
+
+        if batch_results:
+            all_results.extend(batch_results)
+
+            # 显示批次数据
+            print(f"\n📊 批次 {batch_num} 数据收集完成，共 {len(batch_results)} 只股票\n")
+
+    # 生成报告
+    if all_results:
+        # 构建批量分析提示词
+        batch_prompt = build_batch_analysis_prompt(all_results)
+
         print("\n" + "="*80)
-        print("💡 提示：请将上述数据提供给 Claude，让其生成上涨原因分析")
+        print("📊 数据收集完成，请 Claude 批量分析上涨原因")
+        print("="*80 + "\n")
+        print(batch_prompt)
+
+        # 保存分析历史
+        save_analyzed_history([r['stock'] for r in all_results])
+
+        # 生成txt模板文件
+        config = load_app_config()
+        output_path = config.get('output', {}).get('save_path', './')  # 默认当前目录
+        filename_template = config.get('output', {}).get('filename_template', '股票上涨原因分析_{date}.txt')
+        filename = filename_template.replace('{date}', datetime.now().strftime('%Y%m%d'))
+        full_path = Path(output_path) / filename
+
+        save_analysis_to_txt(all_results, str(full_path))
+
+        print("\n" + "="*80)
+        print("💡 提示：")
+        print("1. 批量分析提示词已显示在上方")
+        print("2. txt模板文件已生成，等待填写分析结果")
+        print("3. Claude 将自动填写分析结果到txt文件")
         print("="*80 + "\n")
     else:
         print("❌ 没有成功分析的股票")
