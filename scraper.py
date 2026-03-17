@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 股票社区观点爬虫
-从3个平台获取最新讨论：东方财富股吧、淘股吧、韭研公社
+从韭研公社获取最新讨论（15天内）
 
 过滤规则：
 - 只保留主贴，过滤其他股票讨论
@@ -78,232 +78,6 @@ except ImportError:
             ALPHAPAI_AVAILABLE = True
     except ImportError:
         pass
-
-def get_market_code(stock_code):
-    """判断股票市场代码"""
-    if stock_code.startswith('6') or stock_code.startswith('688'):
-        return 'sh'
-    elif stock_code.startswith('0') or stock_code.startswith('3'):
-        return 'sz'
-    else:
-        return 'sz'
-
-def scrape_eastmoney_guba(stock_code):
-    """爬取东方财富股吧"""
-    url = f"https://guba.eastmoney.com/list,{stock_code}.html"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        posts = soup.select('tr[class*="listitem"]')
-        candidates = []
-
-        # 过滤关键词
-        filter_keywords = ['交易单', '晒单', '持仓', '盈利', '亏损', '割肉', '加仓', '减仓', '卖掉', '买回来']
-        # 质量关键词（包含这些词的帖子加分）
-        quality_keywords = ['分析', '逻辑', '研究', '解读', '观点', '看法', '深度', '解析', '点评', '预测']
-
-        for post in posts:
-            title_elem = post.find('a', href=re.compile(r'/news,'))
-            if title_elem:
-                title = title_elem.get_text(strip=True)
-                href = title_elem.get('href', '')
-
-                # 只保留主贴（data-posttype="0"是普通主贴）
-                data_posttype = title_elem.get('data-posttype', '')
-                if data_posttype not in ['0', '1']:
-                    continue
-
-                # 过滤掉其他股票代码的帖子
-                if f',{stock_code},' not in href:
-                    continue
-
-                # 过滤掉晒交易单的帖子
-                if any(keyword in title for keyword in filter_keywords):
-                    continue
-
-                # 过滤太短的标题（少于8个字）
-                if len(title) < 8:
-                    continue
-
-                if href and not href.startswith('http'):
-                    href = 'https://guba.eastmoney.com' + href
-
-                # 提取时间
-                time_elem = post.select_one('div.update')
-                post_time = time_elem.get_text(strip=True) if time_elem else '-'
-
-                # 提取阅读数和评论数
-                read_elem = post.select_one('div.read')
-                comment_elem = post.select_one('div.reply')
-                read_count = int(read_elem.get_text(strip=True)) if read_elem and read_elem.get_text(strip=True).isdigit() else 0
-                comment_count = int(comment_elem.get_text(strip=True)) if comment_elem and comment_elem.get_text(strip=True).isdigit() else 0
-
-                # 计算热度分数（阅读数 + 评论数*10）
-                heat_score = read_count + comment_count * 10
-
-                # 质量加分：包含质量关键词的帖子额外加分
-                quality_bonus = sum(1000 for keyword in quality_keywords if keyword in title)
-                heat_score += quality_bonus
-
-                candidates.append({
-                    'title': title,
-                    'time': post_time,
-                    'link': href,
-                    'heat_score': heat_score
-                })
-
-        # 按热度排序
-        candidates.sort(key=lambda x: x['heat_score'], reverse=True)
-
-        # 标题去重：过滤掉相似的标题
-        unique_results = []
-        seen_titles = []
-
-        for c in candidates:
-            title = c['title']
-            post_time = c['time']
-
-            # 时间过滤：只保留40天内的帖子
-            if not is_within_days(post_time, days=40):
-                continue
-
-            # 检查是否与已有标题重复
-            is_duplicate = False
-            for seen_title in seen_titles:
-                # 提取两个标题中的所有数字
-                numbers1 = set(re.findall(r'\d+\.?\d*', title))
-                numbers2 = set(re.findall(r'\d+\.?\d*', seen_title))
-
-                # 如果两个标题包含相同的关键数字（至少2个相同且总数>=2），认为是重复
-                common_numbers = numbers1 & numbers2
-                if len(common_numbers) >= 2 and len(numbers1) >= 2:
-                    is_duplicate = True
-                    break
-
-                # 或者标题文字相似度很高（去掉数字后相似）
-                title_text = re.sub(r'\d+\.?\d*', '', title).replace('：', '').replace(':', '')
-                seen_text = re.sub(r'\d+\.?\d*', '', seen_title).replace('：', '').replace(':', '')
-                # 如果去掉数字后的文字有70%以上相同，也认为是重复
-                if len(title_text) > 10 and len(seen_text) > 10:
-                    common_chars = sum(1 for c in title_text if c in seen_text)
-                    similarity = common_chars / max(len(title_text), len(seen_text))
-                    if similarity > 0.7:
-                        is_duplicate = True
-                        break
-
-            if not is_duplicate:
-                unique_results.append({'title': title, 'time': c['time'], 'link': c['link']})
-                seen_titles.append(title)
-
-                # 取前6条不重复的
-                if len(unique_results) >= 6:
-                    break
-
-        return {'success': True, 'data': unique_results}
-
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-
-def scrape_taoguba(stock_code, stock_name):
-    """爬取淘股吧"""
-    market = get_market_code(stock_code)
-    url = f"https://www.tgb.cn/quotes/{market}{stock_code}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # 查找讨论内容 - 使用stockNews类
-        posts = soup.select('div.stockNews')
-        results = []
-
-        # 过滤关键词
-        filter_keywords = ['交易单', '晒单', '持仓', '盈利', '亏损', '割肉', '加仓', '减仓', '日记', '我的']
-        # 个人交易记录关键词（通常出现在日期后面）
-        personal_record_keywords = ['痛定思痛', '逆势', '翻盘', '华富', '复盘', '总结', '反思', '记录']
-
-        for post in posts:
-            if len(results) >= 5:
-                break
-
-            try:
-                # 提取标题
-                title_elem = post.select_one('div.related-subject a')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    href = title_elem.get('href', '')
-                    if href and not href.startswith('http'):
-                        href = 'https://www.tgb.cn' + href
-
-                    # 去掉链接中的锚点（#T股票名）
-                    if '#' in href:
-                        href = href.split('#')[0]
-
-                    # 过滤掉晒交易单的帖子
-                    if any(keyword in title for keyword in filter_keywords):
-                        continue
-
-                    # 过滤标题过短的（少于4个字）
-                    if len(title) < 4:
-                        continue
-
-                    # 过滤纯数字或日期格式的标题
-                    # 例如："1.4"、"2026.3.9"等
-                    if re.match(r'^[\d\.\-/]+$', title):
-                        continue
-
-                    # 过滤以日期开头的个人交易记录
-                    # 例如："2026.2.27痛定思痛逆势翻盘"、"2026.2.27华富"
-                    if re.match(r'^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}', title):
-                        # 检查是否包含个人记录关键词
-                        if any(keyword in title for keyword in personal_record_keywords):
-                            continue
-                        # 或者日期后面的内容很短（少于6个字），也认为是个人记录
-                        date_match = re.match(r'^(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})(.*)', title)
-                        if date_match and len(date_match.group(2)) < 6:
-                            continue
-
-                    # 过滤掉纯数字+股票名的标题（通常是晒单）
-                    # 例如："2026-3-9，+40147，青云科技"
-                    if re.match(r'^\d{4}[-./]\d{1,2}[-./]\d{1,2}[，,].*[+\-]\d+', title):
-                        continue
-
-                    # 提取时间
-                    time_elem = post.select_one('div.related-sources')
-                    post_time = time_elem.get_text(strip=True) if time_elem else '-'
-                    # 清理时间格式（去掉"发布主帖"等文字）
-                    post_time = post_time.replace('发布主帖', '').replace('回复主帖', '').strip()
-
-                    # 时间过滤：只保留最近30天的内容
-                    if not is_within_days(post_time, days=30):
-                        continue
-
-                    results.append({
-                        'title': title,
-                        'time': post_time,
-                        'link': href
-                    })
-            except Exception:
-                continue
-
-        if results:
-            return {'success': True, 'data': results}
-        else:
-            return {'success': False, 'error': '未找到相关讨论'}
-
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-
 
 def extract_relevant_summary(stock_name, content, content_type):
     """从内容中提取与股票相关的段落作为摘要"""
@@ -442,7 +216,7 @@ def fetch_alphapai_roadshow(stock_name):
 
         # 计算1个月前的日期
         end_time = datetime.now().strftime('%Y-%m-%d')
-        start_time = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        start_time = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
 
         # 调用 recall_data 获取路演纪要
         result = client.recall_data(
@@ -544,7 +318,7 @@ def fetch_alphapai_comments(stock_name):
 
         # 计算1个月前的日期
         end_time = datetime.now().strftime('%Y-%m-%d')
-        start_time = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        start_time = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
 
         # 调用 recall_data 获取机构点评
         result = client.recall_data(
@@ -637,7 +411,7 @@ def fetch_alphapai_wechat(stock_name, comment_ids):
 
         # 计算1个月前的日期
         end_time = datetime.now().strftime('%Y-%m-%d')
-        start_time = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        start_time = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
 
         # 调用 recall_data 获取公众号文章
         result = client.recall_data(
@@ -812,9 +586,32 @@ def scrape_jiuyangongshe(stock_name):
                 if not link_elem:
                     continue
 
+                # 访问文章详情页获取发布时间
+                try:
+                    detail_page = context.new_page()
+                    detail_page.goto(link_elem, wait_until='domcontentloaded', timeout=10000)
+                    time.sleep(1)
+
+                    # 提取时间
+                    time_elem = detail_page.query_selector('[class*="date"]')
+                    if time_elem:
+                        time_text = time_elem.inner_text().strip().split()[0]  # 只取日期部分
+                    else:
+                        time_text = '最近'
+
+                    detail_page.close()
+
+                    # 过滤15天内的文章
+                    if not is_within_days(time_text, days=15):
+                        continue
+
+                except:
+                    # 如果获取时间失败，跳过这篇文章
+                    continue
+
                 item = {
                     'title': title,
-                    'time': '最近',
+                    'time': time_text,
                     'link': link_elem
                 }
 
@@ -853,20 +650,16 @@ def scrape_jiuyangongshe(stock_name):
 
 
 def fetch_all_platforms(stock_code, stock_name):
-    """并行获取所有平台数据（包括 alphapai 数据源）"""
+    """并行获取所有平台数据（韭研公社 + AlphaPai投研）"""
     results = {
-        '东方财富股吧': None,
-        '淘股吧': None,
         '韭研公社': None,
         '路演纪要': None,
         '机构点评': None
     }
 
     # 并行获取所有数据源
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
-            executor.submit(scrape_eastmoney_guba, stock_code): '东方财富股吧',
-            executor.submit(scrape_taoguba, stock_code, stock_name): '淘股吧',
             executor.submit(scrape_jiuyangongshe, stock_name): '韭研公社',
             executor.submit(fetch_alphapai_roadshow, stock_name): '路演纪要',
             executor.submit(fetch_alphapai_comments, stock_name): '机构点评'
@@ -881,174 +674,3 @@ def fetch_all_platforms(stock_code, stock_name):
                 results[platform] = {'success': False, 'error': str(e)}
 
     return results
-
-def format_output(stock_code, stock_name, results):
-    """格式化输出"""
-    print(f"\n{'='*80}")
-    print(f"📊 {stock_name}({stock_code}) 社区观点 + 专业投研")
-    print(f"{'='*80}\n")
-
-    # 第一部分：社区讨论（韭研公社 -> 东方财富股吧 -> 淘股吧）
-    print("## 📱 社区讨论\n")
-    community_platforms = ['韭研公社', '东方财富股吧', '淘股吧']
-
-    for platform in community_platforms:
-        if platform not in results:
-            continue
-
-        result = results[platform]
-        print(f"### {platform}")
-        print()
-
-        if result and result['success']:
-            for idx, item in enumerate(result['data'], 1):
-                print(f"{idx}. {item['title']}")
-                print(f"   ⏰ {item['time']}")
-                print(f"   🔗 {item['link']}")
-                print()
-        else:
-            error_msg = result.get('error', '未知错误') if result else '获取失败'
-            print(f"⚠️ {error_msg}\n")
-
-    # 第二部分：专业投研（路演纪要 -> 机构点评）
-    print(f"\n## 📈 专业投研（最近1个月）\n")
-    alphapai_platforms = ['路演纪要', '机构点评']
-
-    for platform in alphapai_platforms:
-        if platform not in results:
-            continue
-
-        result = results[platform]
-        print(f"### {platform}")
-        print()
-
-        if result and result['success']:
-            data = result.get('data', [])
-            if data:
-                for idx, item in enumerate(data, 1):
-                    print(f"{idx}. {item['title']}")
-                    print(f"   ⏰ {item['time']}")
-                    if platform == '机构点评' and item.get('institution'):
-                        print(f"   🏢 {item['institution']}")
-                    print(f"   🔗 {item['link']}")
-                    # 显示内容摘要
-                    if item.get('summary'):
-                        print(f"   📝 {item['summary']}")
-                    print()
-            else:
-                print(f"⚠️ 未找到相关内容\n")
-        else:
-            error_msg = result.get('error', '未知错误') if result else '获取失败'
-            print(f"⚠️ {error_msg}\n")
-
-    print(f"{'='*80}")
-    print("⚠️ 以上内容来自社区讨论和专业投研，仅供参考，不构成投资建议")
-    print(f"{'='*80}\n")
-
-def save_to_markdown(stock_code, stock_name, results, output_dir=None):
-    """保存结果为 markdown 文件"""
-    from datetime import datetime
-
-    # 确定输出目录 - 固定保存到 D:\Claude专用文件夹\
-    if output_dir is None:
-        output_dir = r"D:\Claude专用文件夹"
-
-    # 生成文件名
-    timestamp = datetime.now().strftime('%Y%m%d')
-    filename = f"{stock_name}_{stock_code}_社区观点_{timestamp}.md"
-    filepath = os.path.join(output_dir, filename)
-
-    # 构建 markdown 内容
-    lines = []
-    lines.append(f"# {stock_name}({stock_code}) 社区观点 + 专业投研\n")
-    lines.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d')}\n")
-    lines.append("---\n\n")
-
-    # 第一部分：社区讨论
-    lines.append("## 📱 社区讨论\n\n")
-    community_platforms = ['韭研公社', '东方财富股吧', '淘股吧']
-
-    for platform in community_platforms:
-        if platform not in results:
-            continue
-
-        result = results[platform]
-        lines.append(f"### {platform}\n\n")
-
-        if result and result['success']:
-            for idx, item in enumerate(result['data'], 1):
-                lines.append(f"{idx}. **{item['title']}**\n")
-                lines.append(f"   - ⏰ {item['time']}\n")
-                lines.append(f"   - 🔗 {item['link']}\n\n")
-        else:
-            error_msg = result.get('error', '未知错误') if result else '获取失败'
-            lines.append(f"⚠️ {error_msg}\n\n")
-
-    # 第二部分：专业投研
-    lines.append("---\n\n")
-    lines.append("## 📈 专业投研（最近1个月）\n\n")
-    alphapai_platforms = ['路演纪要', '机构点评']
-
-    for platform in alphapai_platforms:
-        if platform not in results:
-            continue
-
-        result = results[platform]
-        lines.append(f"### {platform}\n\n")
-
-        if result and result['success']:
-            data = result.get('data', [])
-            if data:
-                for idx, item in enumerate(data, 1):
-                    lines.append(f"{idx}. **{item['title']}**\n")
-                    lines.append(f"   - ⏰ {item['time']}\n")
-                    if platform == '机构点评' and item.get('institution'):
-                        lines.append(f"   - 🏢 {item['institution']}\n")
-                    lines.append(f"   - 🔗 {item['link']}\n")
-                    # 添加内容摘要
-                    if item.get('summary'):
-                        lines.append(f"   - 📝 {item['summary']}\n")
-                    lines.append("\n")
-            else:
-                lines.append(f"⚠️ 未找到相关内容\n\n")
-        else:
-            error_msg = result.get('error', '未知错误') if result else '获取失败'
-            lines.append(f"⚠️ {error_msg}\n\n")
-
-    # 数据来源说明
-    lines.append("---\n\n")
-    lines.append("## 📊 数据来源\n\n")
-    lines.append("- **社区讨论**: 东方财富股吧、韭研公社、淘股吧\n")
-    lines.append("- **专业投研**: AlphaPai 投研数据（路演纪要、机构点评）\n")
-    lines.append("- **时间范围**: 社区讨论为实时，专业投研为最近30天\n\n")
-    lines.append("---\n\n")
-    lines.append("⚠️ **免责声明**: 以上内容来自社区讨论和专业投研，仅供参考，不构成投资建议。投资有风险，入市需谨慎。\n")
-
-    # 写入文件
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.writelines(lines)
-
-    return filepath
-
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("用法: python scraper.py <股票代码> <股票名称> [--save]")
-        print("示例: python scraper.py 600845 宝信软件")
-        print("      python scraper.py 600845 宝信软件 --save  # 保存为markdown文件")
-        sys.exit(1)
-
-    stock_code = sys.argv[1]
-    stock_name = sys.argv[2]
-    save_markdown = '--save' in sys.argv
-
-    print(f"正在获取 {stock_name}({stock_code}) 的社区观点...")
-    results = fetch_all_platforms(stock_code, stock_name)
-    format_output(stock_code, stock_name, results)
-
-    # 如果指定了 --save 参数，保存为 markdown 文件
-    if save_markdown:
-        try:
-            filepath = save_to_markdown(stock_code, stock_name, results)
-            print(f"\n✓ 报告已保存至: {filepath}")
-        except Exception as e:
-            print(f"\n✗ 保存失败: {e}")

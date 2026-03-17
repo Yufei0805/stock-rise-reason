@@ -27,12 +27,6 @@ data_sources:
     - name: "韭研公社"
       enabled: true
       max_items: 6
-    - name: "东方财富股吧"
-      enabled: true
-      max_items: 6
-    - name: "淘股吧"
-      enabled: true
-      max_items: 5
 
   research:
     - name: "路演纪要"

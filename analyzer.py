@@ -311,65 +311,6 @@ def fetch_stock_data(stock_code, stock_name):
         return {'success': False, 'error': str(e)}
 
 
-def parse_scraper_output(output):
-    """解析 scraper.py 的输出"""
-    data = {
-        'success': True,
-        'community': {
-            'jiuyangongshe': [],
-            'eastmoney': [],
-            'taoguba': []
-        },
-        'research': {
-            'roadshow': [],
-            'comment': []
-        }
-    }
-
-    lines = output.split('\n')
-    current_section = None
-    current_platform = None
-
-    for line in lines:
-        line = line.strip()
-
-        # 识别章节
-        if '## 📱 社区讨论' in line:
-            current_section = 'community'
-        elif '## 📈 专业投研' in line:
-            current_section = 'research'
-        elif '### 韭研公社' in line:
-            current_platform = 'jiuyangongshe'
-        elif '### 东方财富股吧' in line:
-            current_platform = 'eastmoney'
-        elif '### 淘股吧' in line:
-            current_platform = 'taoguba'
-        elif '### 路演纪要' in line:
-            current_platform = 'roadshow'
-        elif '### 机构点评' in line:
-            current_platform = 'comment'
-
-        # 提取标题（以数字开头）
-        if line and line[0].isdigit() and '. **' in line:
-            # 提取标题
-            if '**' in line:
-                start = line.find('**') + 2
-                end = line.find('**', start)
-                if end > start:
-                    title = line[start:end]
-
-                    if current_section == 'community' and current_platform:
-                        data['community'][current_platform].append(title)
-
-        # 提取投研摘要（📝 开头）
-        if line.startswith('📝'):
-            summary = line[2:].strip()
-            if current_section == 'research' and current_platform:
-                data['research'][current_platform].append(summary)
-
-    return data
-
-
 def analyze_rise_reason(stock_code, stock_name, data, mode='flash'):
     """分析上涨原因 - 直接返回数据供 Claude 分析"""
     # 提取关键信息
@@ -386,44 +327,6 @@ def analyze_rise_reason(stock_code, stock_name, data, mode='flash'):
         'research_summaries': research_summaries[:15],  # 最多15条
         'stats': count_data_sources(data)
     }
-
-
-def build_analysis_prompt(stock_name, data):
-    """构建分析提示词"""
-    prompt = f"基于以下社区讨论和专业投研数据，分析{stock_name}近期上涨的主要原因。\n\n"
-    prompt += "要求：\n"
-    prompt += "1. 100字以内\n"
-    prompt += "2. 提取核心驱动因素（如：业绩、政策、行业、事件等）\n"
-    prompt += "3. 优先引用专业投研观点\n"
-    prompt += "4. 语言简洁专业\n\n"
-
-    # 添加社区讨论标题
-    prompt += "社区讨论热点：\n"
-    all_titles = []
-    for platform, titles in data['community'].items():
-        all_titles.extend(titles[:3])  # 每个平台取前3条
-
-    if all_titles:
-        for i, title in enumerate(all_titles[:10], 1):  # 最多10条
-            prompt += f"{i}. {title}\n"
-    else:
-        prompt += "（无相关讨论）\n"
-
-    prompt += "\n"
-
-    # 添加专业投研摘要
-    prompt += "专业投研观点：\n"
-    all_summaries = []
-    for platform, summaries in data['research'].items():
-        all_summaries.extend(summaries[:3])  # 每个平台取前3条
-
-    if all_summaries:
-        for i, summary in enumerate(all_summaries[:10], 1):  # 最多10条
-            prompt += f"{i}. {summary}\n"
-    else:
-        prompt += "（无相关投研）\n"
-
-    return prompt
 
 
 def count_data_sources(data):
@@ -459,10 +362,10 @@ def build_batch_analysis_prompt(batch_results):
         stock_name = stock['name'] or stock['code']
         prompt += f"【股票{idx}】{stock_name} ({stock['code']})\n\n"
 
-        # 社区讨论
+        # 社区讨论（最多15条）
         if analysis['community_titles']:
             prompt += "社区讨论热点：\n"
-            for i, title in enumerate(analysis['community_titles'][:8], 1):
+            for i, title in enumerate(analysis['community_titles'][:15], 1):
                 prompt += f"{i}. {title}\n"
             prompt += "\n"
 
@@ -479,52 +382,6 @@ def build_batch_analysis_prompt(batch_results):
     prompt += '{"analyses": [{"code": "股票代码", "name": "股票名称", "reason": "上涨原因分析"}]}\n'
 
     return prompt
-
-
-def generate_report(results, output_file=None):
-    """生成报告 - 输出数据供 Claude 分析"""
-    print("\n" + "="*80)
-    print("📊 股票数据已收集，请 Claude 分析上涨原因")
-    print("="*80 + "\n")
-
-    for result in results:
-        stock = result['stock']
-        analysis = result['analysis']
-
-        # 股票标题
-        if stock['name']:
-            print(f"## {stock['name']} ({stock['code']})")
-        else:
-            print(f"## {stock['code']}")
-        print()
-
-        # 数据来源统计
-        stats = analysis['stats']
-        print(f"**数据来源**: {stats['community']}条社区讨论 + {stats['research']}条专业投研")
-        print()
-
-        # 社区讨论标题
-        if analysis['community_titles']:
-            print("**社区讨论热点**:")
-            for i, title in enumerate(analysis['community_titles'], 1):
-                print(f"{i}. {title}")
-            print()
-
-        # 专业投研摘要
-        if analysis['research_summaries']:
-            print("**专业投研观点**:")
-            for i, summary in enumerate(analysis['research_summaries'], 1):
-                print(f"{i}. {summary}")
-            print()
-
-        print("---")
-        print()
-
-    print("\n请基于以上数据，为每只股票生成100字以内的上涨原因分析。")
-    print("="*80 + "\n")
-
-    # 返回结果供后续处理
-    return results
 
 
 def save_analysis_to_txt(results, output_path):
