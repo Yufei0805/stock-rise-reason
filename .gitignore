@@ -44,6 +44,9 @@ Thumbs.db
 !SKILL.md
 !requirements.txt
 
+# Data files (runtime generated)
+data/analyzed_history.json
+
 # Logs
 *.log
 
